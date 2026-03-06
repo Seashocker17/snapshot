@@ -183,8 +183,9 @@ async function takeSnapshot(filename) {
 }
 
 // 2. Set up the Electron Window (Standard Boilerplate)
+let mainWindow = null;
 const createWindow = () => {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1000,
     height: 700,
     webPreferences: {
@@ -291,6 +292,55 @@ ipcMain.handle('compare-snapshots', async (event, baselineName, afterName) => {
 });
 
 ipcMain.handle('upload-snapshot', async (event, filename) => {
+  let snapshotId = null;
+
+  const withStatus = (baseData, status, errorMessage = null) => {
+    const safeBase = baseData && typeof baseData === 'object' ? baseData : {};
+    const baseMetadata = safeBase.metadata && typeof safeBase.metadata === 'object'
+      ? safeBase.metadata
+      : {};
+
+    return {
+      ...safeBase,
+      metadata: {
+        ...baseMetadata,
+        snapshot_status: status,
+        error: errorMessage,
+        status_updated_at: new Date().toISOString(),
+      },
+    };
+  };
+
+  const createSnapshotRow = async (serverUrl, apiKey, payload) => {
+    const body = JSON.stringify(payload);
+    const url = new URL('/api/snapshots', serverUrl);
+
+    const result = await makeRequest(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, body);
+
+    return result;
+  };
+
+  const updateSnapshotRow = async (serverUrl, apiKey, id, payload) => {
+    const body = JSON.stringify(payload);
+    const url = new URL(`/api/snapshots/${id}`, serverUrl);
+
+    return makeRequest(url.toString(), {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, body);
+  };
+
   try {
     const serverUrl = process.env.SNAPSHOT_SERVER_URL;
     const apiKey = process.env.SNAPSHOT_API_KEY;
@@ -301,39 +351,81 @@ ipcMain.handle('upload-snapshot', async (event, filename) => {
       return { success: false, error: 'SNAPSHOT_SERVER_URL and SNAPSHOT_API_KEY env vars not set' };
     }
 
+    const pendingPayload = {
+      machine_id: machineId,
+      machine_name: machineName,
+      snapshot_name: filename,
+      data: withStatus({
+        metadata: {
+          snapshot_name: filename,
+          timestamp: new Date().toISOString(),
+        }
+      }, 'Pending')
+    };
+
+    const pendingResult = await createSnapshotRow(serverUrl, apiKey, pendingPayload);
+    if (pendingResult.status !== 200 && pendingResult.status !== 201) {
+      return { success: false, error: pendingResult.body?.message || pendingResult.body?.error || `HTTP ${pendingResult.status}` };
+    }
+
+    snapshotId = pendingResult.body?.id;
+    if (!snapshotId) {
+      return { success: false, error: 'Upload failed: missing snapshot id from server' };
+    }
+
+    const runningResult = await updateSnapshotRow(serverUrl, apiKey, snapshotId, {
+      data: withStatus({
+        metadata: {
+          snapshot_name: filename,
+          timestamp: new Date().toISOString(),
+        }
+      }, 'Running')
+    });
+
+    if (runningResult.status !== 200) {
+      return { success: false, error: runningResult.body?.message || runningResult.body?.error || `HTTP ${runningResult.status}` };
+    }
+
     // Load the local snapshot
     const snapshotPath = path.join(app.getPath('userData'), `${filename}.json`);
     const data = JSON.parse(fs.readFileSync(snapshotPath, 'utf-8'));
 
-    const body = JSON.stringify([
-      {
-        machine_id: machineId,
-        machine_name: machineName,
-        snapshot_name: filename,
-        timestamp: data.metadata?.timestamp,
-        data
-      }
-    ]);
-    const url = new URL('/rest/v1/snapshots', serverUrl);
+    const completedData = withStatus(data, 'Completed');
 
-    const result = await makeRequest(url.toString(), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': apiKey,
-        'Authorization': `Bearer ${apiKey}`,
-        'Prefer': 'return=representation',
-        'Content-Length': Buffer.byteLength(body)
-      }
-    }, body);
+    const completedResult = await updateSnapshotRow(serverUrl, apiKey, snapshotId, {
+      machine_name: machineName,
+      snapshot_name: filename,
+      timestamp: completedData.metadata?.timestamp || new Date().toISOString(),
+      data: completedData
+    });
 
-    if (result.status === 201 || result.status === 200) {
-      return { success: true, id: result.body[0]?.id };
-    } else {
-      return { success: false, error: result.body?.message || result.body?.error || `HTTP ${result.status}` };
+    if (completedResult.status === 200) {
+      return { success: true, id: snapshotId };
     }
+
+    return { success: false, error: completedResult.body?.message || completedResult.body?.error || `HTTP ${completedResult.status}` };
   } catch (e) {
     console.error('Error uploading snapshot:', e);
+
+    if (snapshotId) {
+      try {
+        const serverUrl = process.env.SNAPSHOT_SERVER_URL;
+        const apiKey = process.env.SNAPSHOT_API_KEY;
+        if (serverUrl && apiKey) {
+          await updateSnapshotRow(serverUrl, apiKey, snapshotId, {
+            data: withStatus({
+              metadata: {
+                snapshot_name: filename,
+                timestamp: new Date().toISOString(),
+              }
+            }, 'Failed', e.message || 'Unknown upload failure')
+          });
+        }
+      } catch (statusError) {
+        console.error('Error updating failed status:', statusError);
+      }
+    }
+
     return { success: false, error: e.message };
   }
 });
@@ -360,11 +452,71 @@ ipcMain.handle('list-remote-snapshots', async (event) => {
   }
 });
 
+let autoSnapshotInterval = null;
+let autoSnapshotMinutes = 10;
+
+function formatSnapshotTimestamp() {
+  const now = new Date();
+  return now.getFullYear() + '-' +
+    String(now.getMonth() + 1).padStart(2, '0') + '-' +
+    String(now.getDate()).padStart(2, '0') + '_' +
+    String(now.getHours()).padStart(2, '0') + '-' +
+    String(now.getMinutes()).padStart(2, '0') + '-' +
+    String(now.getSeconds()).padStart(2, '0');
+}
+
+function startAutoSnapshot(minutes) {
+  if (minutes !== undefined) {
+    autoSnapshotMinutes = minutes;
+  }
+  stopAutoSnapshot();
+
+  // Take one immediately on start
+  takeSnapshot(`snapshot_${formatSnapshotTimestamp()}_auto`)
+    .then(() => { if (mainWindow) mainWindow.webContents.send('snapshot-taken'); })
+    .catch(e => console.error('Auto-snapshot failed:', e.message));
+
+  autoSnapshotInterval = setInterval(async () => {
+    try {
+      await takeSnapshot(`snapshot_${formatSnapshotTimestamp()}_auto`);
+      if (mainWindow) mainWindow.webContents.send('snapshot-taken');
+    } catch (e) {
+      console.error('Auto-snapshot failed:', e.message);
+    }
+  }, autoSnapshotMinutes * 60 * 1000);
+}
+
+function stopAutoSnapshot() {
+  if (autoSnapshotInterval) {
+    clearInterval(autoSnapshotInterval);
+    autoSnapshotInterval = null;
+  }
+}
+
+ipcMain.handle('start-auto-snapshot', (event, minutes) => {
+  startAutoSnapshot(minutes);
+  return true;
+});
+
+ipcMain.handle('stop-auto-snapshot', () => {
+  stopAutoSnapshot();
+  return true;
+});
+
+ipcMain.handle('set-auto-snapshot-interval', (event, minutes) => {
+  autoSnapshotMinutes = minutes;
+  if (autoSnapshotInterval) {
+    startAutoSnapshot(); // restart with new interval
+  }
+  return true;
+});
+
+ipcMain.handle('get-auto-snapshot-interval', () => {
+  return autoSnapshotMinutes;
+});
+
 // 3. Run the app and test our function
 app.whenReady().then(() => {
   createWindow();
-  
-  // For testing: Let's take the "Before" snapshot immediately when the app starts
-  // Commented out for now - we'll take snapshots from the UI
-  // takeSnapshot('baseline_before_install');
+  startAutoSnapshot();
 });
