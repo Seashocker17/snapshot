@@ -140,43 +140,31 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [sortField, setSortField] = useState<SortField>('updated');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [query, setQuery] = useState('');
 
   const apiKey = process.env.NEXT_PUBLIC_API_KEY || DEFAULT_PUBLIC_API_KEY;
 
+  async function loadSnapshots() {
+    try {
+      setRefreshing(true);
+      const response = await fetch('/api/snapshots', { headers: { 'x-api-key': apiKey } });
+      if (!response.ok) throw new Error(`Server returned ${response.status}`);
+      const data = await response.json();
+      setSnapshots(Array.isArray(data) ? data : []);
+      setError('');
+    } catch (e: any) {
+      setError(`Failed to load snapshots: ${e.message}`);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }
+
   useEffect(() => {
-    let isMounted = true;
-
-    const loadSnapshots = () => {
-      fetch('/api/snapshots', { headers: { 'x-api-key': apiKey } })
-        .then(async r => {
-          if (!r.ok) throw new Error(`Server returned ${r.status}`);
-          return r.json();
-        })
-        .then(data => {
-          if (!isMounted) return;
-          setSnapshots(Array.isArray(data) ? data : []);
-          setError('');
-          setLoading(false);
-        })
-        .catch((e) => {
-          if (!isMounted) return;
-          setError(`Failed to load snapshots: ${e.message}`);
-          setLoading(false);
-        });
-    };
-
     loadSnapshots();
-    // Poll every 5 minutes (300s) instead of 60s to minimize Supabase egress on free tier
-    // Users can manually refresh if they need latest data
-    const interval = setInterval(loadSnapshots, 300000);
-
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
   }, [apiKey]);
 
   async function loadSnapshot(id: string) {
@@ -287,9 +275,16 @@ export default function Dashboard() {
         <div className="p-4 bg-gradient-to-r from-indigo-500 to-purple-600 text-white">
           <h1 className="text-xl font-bold">📸 Snapshot Server</h1>
           <p className="text-sm opacity-80">Multi-machine dashboard</p>
+          <button
+            onClick={loadSnapshots}
+            disabled={refreshing}
+            className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 bg-white/20 hover:bg-white/30 disabled:opacity-60 rounded-lg text-sm font-medium transition-colors"
+          >
+            {refreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
           <Link
             href="/dashboard/engineer"
-            className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-medium transition-colors"
+            className="mt-3 ml-2 inline-flex items-center gap-2 px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-medium transition-colors"
           >
             <span>⚙️</span>
             Engineer Panel
@@ -337,6 +332,7 @@ export default function Dashboard() {
           <p className="text-xs text-gray-500">
             {totalMachines} machines · {snapshots.length} snapshots
           </p>
+          <p className="text-xs text-gray-400">Manual refresh only to keep Supabase egress and Vercel CPU low.</p>
         </div>
 
         {visibleMachines.map(machine => {
@@ -464,7 +460,7 @@ export default function Dashboard() {
             {/* Processes */}
             <section>
               <h3 className="text-lg font-semibold text-gray-700 mb-3">
-                ⚙️ Top Processes ({selected.data?.running_processes?.length} total)
+                ⚙️ Top Processes ({selected.process_count ?? selected.data?.running_processes?.length ?? 0} total)
               </h3>
               <div className="bg-white rounded-lg shadow-sm overflow-hidden">
                 {selected.data?.running_processes?.slice(0, 20).map((proc: any, i: number) => (

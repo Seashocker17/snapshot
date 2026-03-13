@@ -3,6 +3,9 @@ import { getSupabase } from '@/lib/supabase';
 
 type SnapshotStatus = 'Pending' | 'Running' | 'Completed' | 'Failed';
 const DEFAULT_API_SECRET_KEY = 'sb_publishable_4cRWlmo693rt6aPU8Tmqjg_ZDnfLWJV';
+const LIST_CACHE_CONTROL = 'public, max-age=60, s-maxage=300, stale-while-revalidate=3600';
+
+export const maxDuration = 5;
 
 function estimateSnapshotSizeBytes(payload: unknown): number {
   try {
@@ -154,17 +157,19 @@ export async function GET(req: NextRequest) {
       snapshot_error: row.snapshot_error ?? null,
     }));
 
-    return NextResponse.json(rows);
+    return NextResponse.json(rows, {
+      headers: { 'Cache-Control': LIST_CACHE_CONTROL },
+    });
   }
 
-  // Backward-compatible fallback for older schemas that only store status/size in data.
+  // Backward-compatible fallback that still avoids fetching the large data blob.
   if (!isMissingDerivedSnapshotColumnsError(error.message)) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
   let legacyQuery = getSupabase()
     .from('snapshots')
-    .select('id, machine_id, machine_name, snapshot_name, timestamp, data')
+    .select('id, machine_id, machine_name, snapshot_name, timestamp')
     .order('timestamp', { ascending: false });
 
   if (machine_id) {
@@ -182,10 +187,12 @@ export async function GET(req: NextRequest) {
     machine_name: row.machine_name,
     snapshot_name: row.snapshot_name,
     timestamp: row.timestamp,
-    snapshot_size_bytes: estimateSnapshotSizeBytes(row.data),
-    snapshot_status: extractStatus(row.data),
-    snapshot_error: extractStatusError(row.data),
+    snapshot_size_bytes: 0,
+    snapshot_status: 'Completed' as SnapshotStatus,
+    snapshot_error: null,
   }));
 
-  return NextResponse.json(rows);
+  return NextResponse.json(rows, {
+    headers: { 'Cache-Control': LIST_CACHE_CONTROL },
+  });
 }

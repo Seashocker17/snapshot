@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
 
 const DEFAULT_API_SECRET_KEY = 'sb_publishable_4cRWlmo693rt6aPU8Tmqjg_ZDnfLWJV';
+const DETAIL_CACHE_CONTROL = 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400';
+
+export const maxDuration = 5;
 
 function isAuthorized(req: NextRequest) {
   const key = req.headers.get('x-api-key');
@@ -56,13 +59,36 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   const { data, error } = await getSupabase()
     .from('snapshots')
-    .select('*')
+    .select('id, machine_id, machine_name, snapshot_name, timestamp, data')
     .eq('id', id)
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 404 });
 
-  return NextResponse.json(data);
+  const processList = Array.isArray(data.data?.running_processes)
+    ? data.data.running_processes.slice(0, 20)
+    : [];
+  const listeningPorts = Array.isArray(data.data?.network?.listening_ports)
+    ? data.data.network.listening_ports.slice(0, 10)
+    : [];
+
+  return NextResponse.json({
+    id: data.id,
+    machine_id: data.machine_id,
+    machine_name: data.machine_name,
+    snapshot_name: data.snapshot_name,
+    timestamp: data.timestamp,
+    process_count: Array.isArray(data.data?.running_processes) ? data.data.running_processes.length : 0,
+    port_count: Array.isArray(data.data?.network?.listening_ports) ? data.data.network.listening_ports.length : 0,
+    data: {
+      integrity: data.data?.integrity ?? null,
+      system: data.data?.system ?? null,
+      network: { listening_ports: listeningPorts },
+      running_processes: processList,
+    },
+  }, {
+    headers: { 'Cache-Control': DETAIL_CACHE_CONTROL },
+  });
 }
 
 // DELETE /api/snapshots/[id]
