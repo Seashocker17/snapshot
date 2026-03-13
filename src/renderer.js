@@ -61,14 +61,10 @@ function buildUI() {
   const htmlString = `
     <div class="container">
       <header>
-        <h1>System Snapshot Viewer</h1>
+        <h1> System Snapshot Viewer</h1>
         <p class="subtitle">View and manage system snapshots</p>
         <div class="header-row">
-          <div>
-            <h1>System Snapshot Viewer</h1>
-            <p class="subtitle">View and manage system snapshots</p>
-          </div>
-          <button id="settingsBtn" class="btn btn-settings" title="Settings"></button>
+          <button id="settingsBtn" class="btn btn-settings" title="Settings">⚙️</button>
         </div>
       </header>
 
@@ -135,6 +131,19 @@ function buildUI() {
           <div class="sidebar-tabs">
             <button id="tabSnapshots" class="sidebar-tab active">📷 Snapshots</button>
             <button id="tabDeltas" class="sidebar-tab">📐 Deltas</button>
+          <div class="snapshot-controls">
+            <button id="newSnapshotBtn" class="btn btn-primary">
+               Take New Snapshot
+            </button>
+            <input 
+              type="text" 
+              id="snapshotName" 
+              placeholder="Enter snapshot name..." 
+              class="input-field"
+              style="margin-bottom: 10px;"
+            />
+
+            
           </div>
 
           <div id="snapshotsPanel" class="tab-panel">
